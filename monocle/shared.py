@@ -18,7 +18,10 @@ class SessionManager:
         try:
             return cls._session
         except AttributeError:
-            cls._session = ClientSession(loop=LOOP)
+            cls._session = ClientSession(loop=LOOP,
+                                         conn_timeout=10,
+                                         read_timeout=30,
+                                         raise_for_status=True)
             return cls._session
 
     @classmethod

@@ -4,9 +4,9 @@ from math import sqrt
 from time import monotonic, time
 from pkg_resources import resource_stream
 from tempfile import TemporaryFile
-from asyncio import gather, TimeoutError
+from asyncio import gather, CancelledError, TimeoutError
 
-from aiohttp import ClientError, DisconnectedError, HttpProcessingError
+from aiohttp import ClientError, ClientResponseError, ServerTimeoutError
 
 from .utils import load_pickle, dump_pickle
 from .db import session_scope, get_pokemon_ranking, estimate_remaining_time
@@ -15,9 +15,8 @@ from .shared import get_logger, SessionManager, LOOP, run_threaded
 
 from . import sanitized as conf
 
-
+WEBHOOK = False
 if conf.NOTIFY:
-    WEBHOOK = False
     TWITTER = False
     PUSHBULLET = False
     TELEGRAM = False
@@ -50,14 +49,6 @@ if conf.NOTIFY:
         PUSHBULLET=True
 
     if conf.WEBHOOKS:
-        try:
-            import ujson as json
-            jargs = {'double_precision': 17}
-        except ImportError:
-            import json
-            jargs = {}
-
-        HEADERS = {'content-type': 'application/json'}
         if len(conf.WEBHOOKS) == 1:
             HOOK_POINT = next(iter(conf.WEBHOOKS))
             WEBHOOK = 1
@@ -357,24 +348,17 @@ class Notification:
 
         try:
             async with session.post(TELEGRAM_BASE_URL, data=payload) as resp:
-                try:
-                    resp.raise_for_status()
-                except HttpProcessingError as e:
-                    try:
-                        response = await resp.json()
-                        self.log.error('Error {} from Telegram: {}', e.code, response['description'])
-                    except Exception:
-                        self.log.error('Error {} from Telegram: {}', e.code, e.message)
-                    return False
                 self.log.info('Sent a Telegram notification about {}.', self.name)
                 return True
-        except (ClientError, DisconnectedError) as e:
-            err = e.__cause__ or e
-            self.log.error('{} during Telegram notification.', err.__class__.__name__)
-            return False
+        except ClientResponseError as e:
+            self.log.error('Error {} from Telegram: {}', e.code, e.message)
+        except ClientError as e:
+            self.log.error('{} during Telegram notification.', e.__class__.__name__)
+        except CancelledError:
+            raise
         except Exception:
             self.log.exception('Exception caught in Telegram notification.')
-            return False
+        return False
 
     async def pbpush(self):
         """ Send a PushBullet notification either privately or to a channel,
@@ -799,9 +783,8 @@ class Notifier:
         except KeyError:
             pass
 
-        payload = json.dumps(data, **jargs)
         session = SessionManager.get()
-        return await self.wh_send(session, payload)
+        return await self.wh_send(session, data)
 
     if WEBHOOK > 1:
         async def wh_send(self, session, payload):
@@ -813,21 +796,16 @@ class Notifier:
 
     async def hook_post(self, w, session, payload):
         try:
-            async with session.post(w, data=payload, timeout=3, headers=HEADERS) as resp:
-                resp.raise_for_status()
+            async with session.post(w, json=payload, timeout=4) as resp:
                 return True
-        except HttpProcessingError as e:
+        except ClientResponseError as e:
             self.log.error('Error {} from webook {}: {}', e.code, w, e.message)
-            return False
-        except TimeoutError:
+        except (TimeoutError, ServerTimeoutError):
             self.log.error('Response timeout from webhook: {}', w)
-            return False
-        except (ClientError, DisconnectedError) as e:
-            err = e.__cause__ or e
-            self.log.error('{} on webhook: {}', err.__class__.__name__, w)
-            return False
+        except ClientError as e:
+            self.log.error('{} on webhook: {}', e.__class__.__name__, w)
         except CancelledError:
             raise
         except Exception:
             self.log.exception('Error from webhook: {}', w)
-            return False
+        return False
