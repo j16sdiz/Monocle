@@ -15,6 +15,7 @@ from .shared import get_logger, SessionManager, LOOP, run_threaded
 
 from . import sanitized as conf
 
+
 WEBHOOK = False
 if conf.NOTIFY:
     TWITTER = False

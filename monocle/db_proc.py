@@ -1,3 +1,5 @@
+import sys
+
 from queue import Queue
 from threading import Thread
 
@@ -79,4 +81,4 @@ class DatabaseProcessor(Thread):
                }
                self.add(mystery)
 
-DB_PROC = DatabaseProcessor()
+sys.modules[__name__] = DatabaseProcessor()

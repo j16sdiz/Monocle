@@ -8,7 +8,7 @@ import json
 from flask import Flask, request, render_template, jsonify, Markup
 
 from monocle import db, sanitized as conf
-from monocle.names import POKEMON_NAMES, MOVES
+from monocle.names import POKEMON_NAMES
 from monocle.web_utils import *
 from monocle.bounds import area, center
 
@@ -66,7 +66,7 @@ def gym_data():
 
 
 @app.route('/spawnpoints')
-def get_spawn_points():
+def spawn_points():
     return jsonify(get_spawnpoint_markers())
 
 
@@ -82,7 +82,6 @@ def scan_coords():
 
 if conf.MAP_WORKERS:
     workers = Workers()
-
 
     @app.route('/workers_data')
     def workers_data():
@@ -131,7 +130,7 @@ def report_main():
                 ],
             },
             'maps_data': {
-                'rare': [sighting_to_marker(s) for s in rare_sightings],
+                'rare': [sighting_to_report_marker(s) for s in rare_sightings],
             },
             'map_center': center,
             'zoom': 13,

@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 
-from datetime import datetime
 from pkg_resources import resource_filename
-from contextlib import contextmanager
-from multiprocessing.managers import BaseManager, RemoteError
-
-import argparse
-import time
+from time import time
 
 from sanic import Sanic
 from sanic.response import html, json
 from jinja2 import Environment, PackageLoader, Markup
 from asyncpg import create_pool
 
-from monocle import db, sanitized as conf
+from monocle import sanitized as conf
 from monocle.bounds import center
-from monocle.names import POKEMON_NAMES, MOVES, POKEMON_MOVES
+from monocle.names import MOVES, POKEMON_MOVES, POKEMON_NAMES
 from monocle.web_utils import get_scan_coords, get_worker_markers, Workers, get_args
 
 
@@ -84,7 +79,7 @@ async def gym_data(request):
 
 
 @app.route('/spawnpoints')
-async def get_spawn_points(request):
+async def spawn_points(request):
     return json(await get_spawnpoints_async())
 
 
@@ -120,9 +115,37 @@ if conf.MAP_WORKERS:
         return html(html_content)
 
 
-async def get_pokemarkers_async(after_id):
-    markers = []
+def sighting_to_marker(pokemon):
+    pokemon_id = pokemon['pokemon_id']
+    marker = {
+        'id': 'pokemon-' + str(pokemon['id']),
+        'trash': pokemon_id in conf.TRASH_IDS,
+        'name': POKEMON_NAMES[pokemon_id],
+        'pokemon_id': pokemon_id,
+        'lat': pokemon['lat'],
+        'lon': pokemon['lon'],
+        'expires_at': pokemon['expire_timestamp'],
+    }
+    if pokemon['move_1']:
+        move1 = pokemon['move_1']
+        move2 = pokemon['move_2']
+        marker['atk'] = pokemon['atk_iv']
+        marker['def'] = pokemon['def_iv']
+        marker['sta'] = pokemon['sta_iv']
+        marker['move1'] = POKEMON_MOVES.get(move1, move1)
+        marker['move2'] = POKEMON_MOVES.get(move2, move2)
+        try:
+            marker['damage1'] = MOVES[move1]['damage']
+        except KeyError:
+            pass
+        try:
+            marker['damage2'] = MOVES[move2]['damage']
+        except KeyError:
+            pass
+    return marker
 
+
+async def get_pokemarkers_async(after_id):
     async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -130,35 +153,11 @@ async def get_pokemarkers_async(after_id):
                     SELECT id, pokemon_id, expire_timestamp, lat, lon, atk_iv, def_iv, sta_iv, move_1, move_2
                     FROM sightings
                     WHERE expire_timestamp > {ts} AND id > {poke_id}
-                '''.format(ts=time.time(), poke_id=after_id))
-
-                for row in results:
-                    content = {
-                        'id': 'pokemon-{}'.format(row[0]),
-                        'trash': row[1] in conf.TRASH_IDS,
-                        'name': POKEMON_NAMES[row[1]],
-                        'pokemon_id': row[1],
-                        'lat': row[3],
-                        'lon': row[4],
-                        'expires_at': row[2]
-                    }
-                    if row[5]:
-                        content.update({
-                            'atk': row[5],
-                            'def': row[6],
-                            'sta': row[7],
-                            'move1': row[8],
-                            'move2': row[9],
-                            'damage1': MOVES.get(row[8], {}).get('damage'),
-                            'damage2': MOVES.get(row[9], {}).get('damage')
-                        })
-                    markers.append(content)
-    return markers
+                '''.format(ts=time(), poke_id=after_id))
+                return tuple(map(sighting_to_marker, results))
 
 
 async def get_gyms_async():
-    markers = []
-
     async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -180,38 +179,30 @@ async def get_gyms_async():
                         GROUP BY fort_id
                     )
                 ''')
-                for row in results:
-                    if row[4]:
-                        pokemon_name = POKEMON_NAMES[row[4]]
-                    else:
-                        pokemon_name = 'Empty'
-                    markers.append({
-                        'id': 'fort-{}'.format(row[0]),
-                        'sighting_id': row[1],
-                        'prestige': row[3],
-                        'pokemon_id': row[4],
-                        'pokemon_name': pokemon_name,
-                        'team': row[2],
-                        'lat': row[6],
-                        'lon': row[7],
-                    })
-    return markers
+                return [{
+                        'id': 'fort-' + str(fort['fort_id']),
+                        'sighting_id': fort['id'],
+                        'prestige': fort['prestige'],
+                        'pokemon_id': fort['guard_pokemon_id'],
+                        'pokemon_name': POKEMON_NAMES.get(fort['guard_pokemon_id'], 'Empty'),
+                        'team': fort['team'],
+                        'lat': fort['lat'],
+                        'lon': fort['lon']
+                } for fort in results]
 
 
 async def get_spawnpoints_async():
     async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                results = await conn.fetch('SELECT spawn_id, despawn_time, lat, lon, duration FROM spawnpoints')
-                return jsonify(results)
+                return jsonify(await conn.fetch('SELECT spawn_id, despawn_time, lat, lon, duration FROM spawnpoints'))
 
 
 async def get_pokestops_async():
     async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                results = await conn.fetch('SELECT external_id, lat, lon FROM pokestops')
-                return jsonify(results)
+                return jsonify(await conn.fetch('SELECT external_id, lat, lon FROM pokestops'))
 
 
 def main():
