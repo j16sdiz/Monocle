@@ -85,6 +85,7 @@ def get_worker_markers(workers):
         seen_here = data[5]
         time = datetime.fromtimestamp(unix_time).strftime('%I:%M:%S %p').lstrip('0')
         markers.append({
+            'type': 'worker',
             'lat': coords[0],
             'lon': coords[1],
             'worker_no': worker_no,
