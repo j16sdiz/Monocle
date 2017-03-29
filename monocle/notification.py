@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from collections import deque
+from base64 import b64encode
 from math import sqrt
 from time import monotonic, time
 from pkg_resources import resource_stream
@@ -773,13 +774,15 @@ class Notifier:
             tth = pokemon['earliest_tth']
             ts = pokemon['seen'] + tth
 
+        eid = b64encode(bytes(str(pokemon['encounter_id']), 'UTF-8'))
+        spid = hex(pokemon['spawn_id']).split('x')[-1] if conf.SPAWN_ID_INT else pokemon['spawn_id']
         data = {
             'type': "pokemon",
             'message': {
-                "encounter_id": pokemon['encounter_id'],
+                "encounter_id": eid,
                 "pokemon_id": pokemon['pokemon_id'],
                 "last_modified_time": pokemon['seen'] * 1000,
-                "spawnpoint_id": pokemon['spawn_id'],
+                "spawnpoint_id": spid,
                 "latitude": pokemon['lat'],
                 "longitude": pokemon['lon'],
                 "disappear_time": ts,
