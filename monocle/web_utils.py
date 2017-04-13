@@ -7,7 +7,7 @@ from monocle import db, utils, sanitized as conf
 from monocle.names import DAMAGE, MOVES, POKEMON
 
 if conf.BOUNDARIES:
-    from shapely.geometry import mapping
+    from shapely.geometry import mapping, Polygon
 
 if conf.MAP_WORKERS:
     try:
@@ -170,17 +170,21 @@ def get_spawnpoint_markers():
 if conf.BOUNDARIES:
     def get_scan_coords():
         markers = []
-        coordinates = mapping(conf.BOUNDARIES)['coordinates']
-        coords = coordinates[0]
-        for blacklist in coordinates[1:]:
+        boundaries = conf.BOUNDARIES
+        if isinstance(boundaries, Polygon):
+            boundaries = [boundaries]
+        for boundary in boundaries:
+            coordinates = mapping(boundary)['coordinates']
+            coords = coordinates[0]
+            for blacklist in coordinates[1:]:
+                markers.append({
+                        'type': 'scanblacklist',
+                        'coords': blacklist
+                    })
             markers.append({
-                    'type': 'scanblacklist',
-                    'coords': blacklist
+                    'type': 'scanarea',
+                    'coords': coords
                 })
-        markers.append({
-                'type': 'scanarea',
-                'coords': coords
-            })
         return markers
 else:
     def get_scan_coords():
