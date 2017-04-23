@@ -2,7 +2,6 @@
 
 from multiprocessing.managers import BaseManager
 from asyncio import get_event_loop, sleep
-from random import uniform
 from time import time
 
 from selenium import webdriver
@@ -12,8 +11,8 @@ from selenium.webdriver.common.by import By
 from aiopogo import PGoApi, close_sessions, activate_hash_server, exceptions as ex
 from aiopogo.auth_ptc import AuthPtc
 
-from monocle import sanitized as conf
-from monocle.utils import random_altitude, get_device_info, get_address, randomize_point
+from monocle import altitudes, sanitized as conf
+from monocle.utils import get_device_info, get_address, randomize_point
 from monocle.bounds import center
 
 
@@ -72,13 +71,13 @@ async def main():
             if location and location != (0,0,0):
                 lat = location[0]
                 lon = location[1]
-                try:
-                    alt = location[2]
-                except IndexError:
-                    alt = random_altitude()
             else:
                 lat, lon = randomize_point(center, 0.0001)
-                alt = random_altitude()
+
+            try:
+                alt = altitudes.get((lat, lon))
+            except KeyError:
+                alt = await altitudes.fetch((lat, lon))
 
             try:
                 device_info = get_device_info(account)

@@ -1,22 +1,19 @@
-from asyncio import sleep, Lock, Semaphore, gather
-from random import choice, randint, uniform, triangular
+from asyncio import gather, Lock, Semaphore, sleep, CancelledError
+from cyrandom import choice, randint, uniform
 from time import time, monotonic
 from queue import Empty
 from itertools import cycle
 from sys import exit
-from concurrent.futures import CancelledError
 from distutils.version import StrictVersion
 
-from aiopogo import PGoApi, json_loads, exceptions as ex
+from aiopogo import PGoApi, HashServer, json_loads, exceptions as ex
 from aiopogo.auth_ptc import AuthPtc
-from aiopogo.hash_server import HashServer
 from pogeo import get_distance
 
 from .db import SIGHTING_CACHE, MYSTERY_CACHE
 from .utils import round_coords, load_pickle, get_device_info, get_spawn_id, get_start_coords, Units, randomize_point
 from .shared import get_logger, LOOP, SessionManager, run_threaded, ACCOUNTS
-from .db_proc import DB_PROC
-from . import avatar, bounds, spawns, sanitized as conf
+from . import altitudes, avatar, bounds, db_proc, spawns, sanitized as conf
 
 if conf.NOTIFY:
     from .notification import Notifier
@@ -24,11 +21,12 @@ if conf.NOTIFY:
 if conf.CACHE_CELLS:
     from array import typecodes
     if 'Q' in typecodes:
-        from aiopogo.utilities import get_cell_ids_compact as get_cell_ids
+        from pogeo import get_cell_ids_compact as _pogeo_cell_ids
     else:
-        from pogeo import get_cell_ids
+        from pogeo import get_cell_ids as _pogeo_cell_ids
 else:
-    from pogeo import get_cell_ids
+    from pogeo import get_cell_ids as _pogeo_cell_ids
+
 
 _unit = getattr(Units, conf.SPEED_UNIT.lower())
 if conf.SPIN_POKESTOPS:
@@ -54,16 +52,18 @@ class Worker:
 
     if conf.CACHE_CELLS:
         cells = load_pickle('cells') or {}
-        def cell_ids(self, lat, lon, radius):
-            rounded = round_coords((lat, lon), 4)
+
+        @classmethod
+        def get_cell_ids(cls, point):
+            rounded = round_coords(point, 4)
             try:
-                return self.cells[rounded]
+                return cls.cells[rounded]
             except KeyError:
-                cells = get_cell_ids(*rounded, radius)
-                self.cells[rounded] = cells
+                cells = _pogeo_cell_ids(rounded)
+                cls.cells[rounded] = cells
                 return cells
     else:
-        cell_ids = get_cell_ids
+        get_cell_ids = _pogeo_cell_ids
 
     login_semaphore = Semaphore(conf.SIMULTANEOUS_LOGINS, loop=LOOP)
     sim_semaphore = Semaphore(conf.SIMULTANEOUS_SIMULATION, loop=LOOP)
@@ -112,7 +112,7 @@ class Worker:
         # State variables
         self.busy = Lock(loop=LOOP)
         # Other variables
-        self.after_spawn = None
+        self.after_spawn = 0
         self.speed = 0
         self.total_seen = 0
         self.error_code = 'INIT'
@@ -160,6 +160,8 @@ class Worker:
                         provider=self.account.get('provider') or 'ptc',
                         timeout=conf.LOGIN_TIMEOUT
                     )
+            except ex.UnexpectedAuthError as e:
+                await self.swap_account('unexpected auth error')
             except ex.AuthException as e:
                 err = e
                 await sleep(2, loop=LOOP)
@@ -467,7 +469,8 @@ class Worker:
                 self.log.info('Auth error on {}: {}', self.username, e)
                 err = e
                 await sleep(3, loop=LOOP)
-                await self.login(reauth=True)
+                if not await self.login(reauth=True):
+                    await self.swap_account(reason='reauth failed')
             except ex.TimeoutException as e:
                 self.error_code = 'TIMEOUT'
                 if not isinstance(e, type(err)):
@@ -585,24 +588,27 @@ class Worker:
             self.simulate_jitter(0.00005)
         return False
 
-    async def visit(self, point, bootstrap=False):
+    async def visit(self, point, spawn_id=None, bootstrap=False):
         """Wrapper for self.visit_point - runs it a few times before giving up
 
         Also is capable of restarting in case an error occurs.
         """
         try:
-            self.altitude = spawns.get_altitude(point, randomize=5)
+            try:
+                self.altitude = altitudes.get(point)
+            except KeyError:
+                self.altitude = await altitudes.fetch(point)
             self.location = point
             self.api.set_position(*self.location, self.altitude)
             if not self.authenticated:
                 await self.login()
-            return await self.visit_point(point, bootstrap=bootstrap)
+            return await self.visit_point(point, spawn_id, bootstrap)
         except ex.NotLoggedInException:
             self.error_code = 'NOT AUTHENTICATED'
             await sleep(1, loop=LOOP)
             if not await self.login(reauth=True):
                 await self.swap_account(reason='reauth failed')
-            return await self.visit(point, bootstrap)
+            return await self.visit(point, spawn_id, bootstrap)
         except ex.AuthException as e:
             self.log.warning('Auth error on {}: {}', self.username, e)
             self.error_code = 'NOT AUTHENTICATED'
@@ -680,21 +686,20 @@ class Worker:
             self.error_code = 'EXCEPTION'
         return False
 
-    async def visit_point(self, point, bootstrap=False):
+    async def visit_point(self, point, spawn_id, bootstrap):
         self.handle.cancel()
         self.error_code = '∞' if bootstrap else '!'
 
-        latitude, longitude = point
         self.log.info('Visiting {0[0]:.4f},{0[1]:.4f}', point)
         start = time()
 
-        cell_ids = self.cell_ids(latitude, longitude, 500)
+        cell_ids = self.get_cell_ids(point)
         since_timestamp_ms = (0,) * len(cell_ids)
         request = self.api.create_request()
         request.get_map_objects(cell_id=cell_ids,
                                 since_timestamp_ms=since_timestamp_ms,
-                                latitude=latitude,
-                                longitude=longitude)
+                                latitude=point[0],
+                                longitude=point[1])
 
         diff = self.last_gmo + self.scan_delay - time()
         if diff > 0:
@@ -721,6 +726,7 @@ class Worker:
         pokemon_seen = 0
         forts_seen = 0
         points_seen = 0
+        seen_target = not spawn_id
 
         try:
             time_of_day = map_objects['time_of_day']
@@ -740,6 +746,7 @@ class Worker:
                 pokemon_seen += 1
 
                 normalized = self.normalize_pokemon(pokemon)
+                seen_target = seen_target or normalized['spawn_id'] == spawn_id
 
                 if (normalized not in SIGHTING_CACHE and
                         normalized not in MYSTERY_CACHE):
@@ -749,22 +756,22 @@ class Worker:
                         try:
                             await self.encounter(normalized, pokemon['spawn_point_id'])
                         except CancelledError:
-                            DB_PROC.add(normalized)
+                            db_proc.add(normalized)
                             raise
                         except Exception as e:
                             self.log.warning('{} during encounter', e.__class__.__name__)
 
                 if notify_conf and self.notifier.eligible(normalized):
-                    if encounter_conf and 'move1' not in normalized:
+                    if encounter_conf and 'move_1' not in normalized:
                         try:
                             await self.encounter(normalized, pokemon['spawn_point_id'])
                         except CancelledError:
-                            DB_PROC.add(normalized)
+                            db_proc.add(normalized)
                             raise
                         except Exception as e:
                             self.log.warning('{} during encounter', e.__class__.__name__)
                     LOOP.create_task(self.notifier.notify(normalized, time_of_day))
-                DB_PROC.add(normalized)
+                db_proc.add(normalized)
 
             for fort in map_cell.get('forts', ()):
                 if not fort.get('enabled'):
@@ -775,9 +782,9 @@ class Worker:
                         norm = self.normalize_lured(fort, request_time_ms)
                         pokemon_seen += 1
                         if norm not in SIGHTING_CACHE:
-                            DB_PROC.add(norm)
+                            db_proc.add(norm)
                     pokestop = self.normalize_pokestop(fort)
-                    DB_PROC.add(pokestop)
+                    db_proc.add(pokestop)
                     if (self.pokestops and not self.bag_full()
                             and time() > self.next_spin
                             and (not conf.SMART_THROTTLE or
@@ -786,18 +793,24 @@ class Worker:
                         if not cooldown or time() > cooldown / 1000:
                             await self.spin_pokestop(pokestop)
                 else:
-                    DB_PROC.add(self.normalize_gym(fort))
+                    db_proc.add(self.normalize_gym(fort))
 
             if more_points:
                 try:
-                    for point in map_cell['spawn_points']:
+                    for p in map_cell['spawn_points']:
                         points_seen += 1
-                        p = point['latitude'], point['longitude']
+                        p = p['latitude'], p['longitude']
                         if spawns.have_point(p) or p not in bounds:
                             continue
                         spawns.cell_points.add(p)
                 except KeyError:
                     pass
+
+        if spawn_id:
+            db_proc.add({
+                'type': 'target',
+                'seen': seen_target,
+                'spawn_id': spawn_id})
 
         if (conf.INCUBATE_EGGS and self.unused_incubators
                 and self.eggs and self.smart_throttle()):
@@ -822,7 +835,7 @@ class Worker:
 
         if conf.MAP_WORKERS:
             self.worker_dict.update([(self.worker_no,
-                ((latitude, longitude), start, self.speed, self.total_seen,
+                (point, start, self.speed, self.total_seen,
                 self.visits, pokemon_seen))])
         self.log.info(
             'Point processed, {} Pokemon and {} forts seen!',
@@ -1006,7 +1019,7 @@ class Worker:
                 'pageurl': responses.get('CHECK_CHALLENGE', {}).get('challenge_url'),
                 'json': 1
             }
-            async with session.post('http://2captcha.com/in.php', params=params, timeout=10) as resp:
+            async with session.post('http://2captcha.com/in.php', params=params) as resp:
                 response = await resp.json(loads=json_loads)
         except CancelledError:
             raise
@@ -1180,7 +1193,6 @@ class Worker:
 
     @staticmethod
     def normalize_lured(raw, now):
-        spawn_id = -1 if conf.SPAWN_ID_INT else 'LURED'
         return {
             'type': 'pokemon',
             'encounter_id': raw['lure_info']['encounter_id'],
@@ -1188,7 +1200,7 @@ class Worker:
             'expire_timestamp': raw['lure_info']['lure_expires_timestamp_ms'] // 1000,
             'lat': raw['latitude'],
             'lon': raw['longitude'],
-            'spawn_id': spawn_id,
+            'spawn_id': -1 if conf.SPAWN_ID_INT else 'LURED',
             'time_till_hidden': (raw['lure_info']['lure_expires_timestamp_ms'] - now) // 1000,
             'inferred': 'pokestop'
         }
