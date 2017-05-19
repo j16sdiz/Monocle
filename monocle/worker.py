@@ -787,7 +787,7 @@ class Worker:
                             or (encounter_conf == 'some'
                             and normalized['pokemon_id'] in conf.ENCOUNTER_IDS)):
                         try:
-                            await self.encounter(normalized, pokemon['spawn_point_id'])
+                            await self.encounter(normalized, pokemon.spawn_point_id)
                         except CancelledError:
                             db_proc.add(normalized)
                             raise
