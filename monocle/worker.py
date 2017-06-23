@@ -138,7 +138,7 @@ class Worker:
             self.api.proxy = next(self.proxies)
         try:
             if self.account['provider'] == 'ptc' and 'auth' in self.account:
-                self.api.auth_provider = AuthPtc(username=self.username, password=self.account['password'], timeout=conf.LOGIN_TIMEOUT)
+                self.api.auth_provider = AuthPtc(username=self.username, password=self.account['password'], proxy=self.api.proxy, timeout=conf.LOGIN_TIMEOUT)
                 self.api.auth_provider._access_token = self.account['auth']
                 self.api.auth_provider._access_token_expiry = self.account['expiry']
                 if self.api.auth_provider.check_access_token():
