@@ -223,7 +223,7 @@ ITEM_LIMITS = {
     202:  5,  # Max Revive
     301:  5,  # Lucky Egg
     401:  5,  # Incense
-    501:  5,  # Lure Module 
+    501:  20, # Lure Module 
     701:  5,  # Razz Berry
     702:  5,  # Bluk Berry
     703:  5,  # Nanab Berry
